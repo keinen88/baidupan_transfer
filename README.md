@@ -7,7 +7,7 @@
 1.  **安装管理器：** 请先安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展。
 2.  **安装脚本：** 点击以下链接安装脚本。
 
-    * [**立即安装 (V10.1 混淆安全版)**](https://github.com/keinen88/baidupan_transfer/raw/refs/heads/main/%E7%99%BE%E5%BA%A6%E7%BD%91%E7%9B%98%E5%89%AA%E8%B4%B4%E6%9D%BF%E6%8F%90%E5%8F%96+%E8%BD%AC%E5%AD%98.user.js)
+    * [**立即安装**](https://github.com/keinen88/baidupan_transfer/raw/refs/heads/main/%E7%99%BE%E5%BA%A6%E7%BD%91%E7%9B%98%E5%89%AA%E8%B4%B4%E6%9D%BF%E6%8F%90%E5%8F%96+%E8%BD%AC%E5%AD%98.user.js)
 
 ## 💡 使用方法
 
