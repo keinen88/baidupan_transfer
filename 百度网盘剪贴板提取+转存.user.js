@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘剪贴板提取+转存
 // @version      1.3 (Mobile + Toast Notification)
-// @description  提取选中的百度网盘链接，自动弹出面板，使用更优雅的Toast提示，并支持一键转存。(已适配手机端, 零权限)
+// @description  提取选中的百度网盘链接，自动弹出面板，并支持一键转存。
 // @license      MIT
 // @match        *://*/*
 // @grant        GM_setClipboard
