@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         百度网盘剪贴板提取+转存
-// @version      1.3
+// @version      1.4
 // @description  提取选中的百度网盘链接，自动弹出面板，并支持一键转存。
 // @license      MIT
 // @match        *://*/*
