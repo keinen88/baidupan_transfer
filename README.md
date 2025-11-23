@@ -7,7 +7,7 @@
 1.  **安装管理器：** 请先安装 [Tampermonkey](https://www.tampermonkey.net/) 扩展。
 2.  **安装脚本：** 点击以下链接安装脚本。
 
-    * [**立即安装**](https://raw.githubusercontent.com/keinen88/baidupan_transfer/refs/heads/main/BaiduPanLinkParser.user.js)
+    * [**立即安装**](https://github.com/keinen88/baidupan_transfer/raw/refs/heads/main/BaiduPanLinkParser.user.js)
     
 ## 💡 使用方法
 
