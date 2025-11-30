@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         百度网盘链接提取与转存
-// @version      1.6.1
+// @version      1.6.2
 // @description  提取选中的百度网盘链接，自动弹出面板
 // @license      MIT
 // @match        *://*/*
