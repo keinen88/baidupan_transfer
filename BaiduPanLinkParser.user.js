@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         百度网盘链接提取与转存
 // @version      2025.11.30
-// @description  提取选中的百度网盘链接，自动弹出面板
+// @description  提取选中的百度网盘链接，自动弹出面板，转存成功后需手动点击跳转
 // @license      MIT
 // @match        *://*/*
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
-// @connect      *
+// @connect      gist.githubusercontent.com
+// @connect      dl.20250823.xyz
+// @connect      dl1.20250823.xyz
+// @connect      dl2.20250823.xyz
 // ==/UserScript==
 
 (function(){
@@ -36,16 +39,13 @@
     function fetchRemoteConfig() {
         if (!REMOTE_CONFIG_URL) return;
 
-        // console.log("正在获取远程 API 配置...");
         GM_xmlhttpRequest({
             method: "GET",
             url: REMOTE_CONFIG_URL,
             onload: function(response) {
                 try {
                     if (response.status === 200) {
-                        // 尝试解析返回的 JSON
                         const remoteList = JSON.parse(response.responseText);
-                        // 简单的格式校验：必须是数组且长度大于0
                         if (Array.isArray(remoteList) && remoteList.length > 0) {
                             activeApiList = remoteList;
                             console.log("云端 API 更新成功，加载节点数:", activeApiList.length);
@@ -61,7 +61,6 @@
         });
     }
 
-    // 脚本启动时立即尝试同步配置
     fetchRemoteConfig();
 
     // --- 极简 Toast 提示 ---
@@ -85,7 +84,6 @@
     // --- 逻辑辅助函数 ---
     function selectNextApiBase(pool) {
         if (!pool || pool.length === 0) return null;
-        // 随机取出一个并从池中移除（确保不重复试同一个）
         return pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
     }
 
@@ -136,11 +134,10 @@
         });
     }
 
-    // --- 核心转存逻辑 ---
+    // --- 核心转存逻辑 (已修改：移除自动跳转，改为手动点击) ---
     function handleTransfer(item, btn, errorDiv, container, closeFunc) {
         const full = makeFullLink(item.url, item.code);
 
-        // 关键：基于当前最新的 activeApiList 创建临时池
         const API_POOL = [...activeApiList];
         const initialApi = selectNextApiBase(API_POOL);
 
@@ -151,11 +148,20 @@
 
         const folder = "/" + new Date().toISOString().replace(/[:.]/g,'-') + (item.code ? "_" + item.code : "");
 
-        const finish = (success, msg) => {
+        // 修改点 1: finish 函数接收 targetUrl 参数
+        const finish = (success, msg, targetUrl) => {
             if (success) {
-                btn.textContent = "成功";
-                showToast("转存成功");
-                setTimeout(() => closeFunc(container), 1500);
+                btn.textContent = "打开"; // 修改点 2: 按钮文字改为“打开”
+                btn.disabled = false;     // 修改点 3: 重新启用按钮
+                btn.style.fontWeight = "bold";
+                btn.style.color = "#008000"; // 绿色文字提示成功
+
+                // 修改点 4: 覆盖按钮点击事件，改为打开新窗口
+                btn.onclick = () => window.open(targetUrl, "_blank");
+
+                showToast("转存成功，请点击“打开”");
+                // 修改点 5: 移除自动关闭面板的代码，以便用户点击
+                // setTimeout(() => closeFunc(container), 1500); 
             } else {
                 btn.textContent = "重试";
                 btn.disabled = false;
@@ -169,7 +175,6 @@
                 if (retries > 1 && pool.length > 0) {
                     const next = selectNextApiBase(pool);
                     showToast("切换线路重试...");
-                    // 递归重试
                     setTimeout(() => tryReq(retries - 1, next, pool), 1000);
                 } else finish(false, reason);
             };
@@ -181,18 +186,17 @@
                         data: { path: "/百度网盘/分享/" + folder, url: full }
                     }, (r2) => {
                         if (r2.response?.code === 200 && r2.response?.data?.errno === 0) {
-                            finish(true);
-                            window.open(api + folder, "_blank");
+                            // 修改点 6: 成功后不直接 open，而是传入 url 给 finish 处理
+                            finish(true, null, api + folder);
                         } else fail(r2.response?.message || "转存失败(API错误)");
                     }, () => fail("网络中断"));
                 } else fail(r1.response?.message || "创建文件夹失败");
             }, () => fail("网络中断"));
         };
-        // 启动重试链
         tryReq(API_POOL.length + 1, initialApi, API_POOL);
     }
 
-    // --- UI 渲染 (样式已优化为加宽加长版) ---
+    // --- UI 渲染 ---
     function renderAuto(container, items) {
         let html = `<div class="p-head">检测到链接 (${items.length}) <span class="p-close">×</span></div>`;
         html += `<div class="p-body">`;
@@ -268,7 +272,6 @@
         container.id = 'pan-simple-panel';
         container._oldItems = items;
 
-        // 面板尺寸：宽 380px
         const w = 380;
         if(x + w > window.innerWidth) x = window.innerWidth - w - 20;
 
@@ -283,7 +286,6 @@
             #pan-simple-panel * { box-sizing: border-box; margin: 0; padding: 0; }
             .p-head { background: #f0f0f0; padding: 8px 10px; font-weight: bold; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; }
             .p-close { cursor: pointer; font-size: 16px; }
-            /* 列表最大高度：360px */
             .p-body { max-height: 360px; overflow-y: auto; }
             .p-item { padding: 10px; border-bottom: 1px solid #eee; }
             .p-url { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #666; margin-bottom: 5px; font-size: 12px; }
