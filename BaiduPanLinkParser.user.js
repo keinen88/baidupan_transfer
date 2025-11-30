@@ -23,42 +23,61 @@
         "https://dl1.20250823.xyz"
     ];
 
-    // 2. 【远程配置地址】 (脚本启动时会自动从此地址更新 API 列表)
-    const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/keinen88/cdab96f5b393eea716453910371fb399/raw/86eb606e09e68ca0083235160088559bf01dd11d/remote_config_url.json";
+    // 2. 【远程配置地址】 (使用原始Gist地址)
+    const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/keinen88/cdab96f5b393eea716453910371fb399/raw/remote_config_url.json";
 
     // ===========================================
 
 
-    let activeApiList = [...DEFAULT_APIS]; // 当前正在使用的列表
+    let remoteApiList = []; // 远程获取的列表
+    let activeApiList = [...DEFAULT_APIS]; // 当前正在使用的列表（先使用默认）
     let lastMouseX = 0;
     let lastMouseY = 0;
     let panelContainer = null;
+    let configLoaded = false; // 标记配置是否已加载
 
     // --- 远程配置获取逻辑 ---
     function fetchRemoteConfig() {
-        if (!REMOTE_CONFIG_URL) return;
+        if (!REMOTE_CONFIG_URL) {
+            configLoaded = true;
+            return;
+        }
+
+        // 添加时间戳防止缓存
+        const url = REMOTE_CONFIG_URL + '?t=' + Date.now();
 
         GM_xmlhttpRequest({
             method: "GET",
-            url: REMOTE_CONFIG_URL,
+            url: url,
+            timeout: 10000, // 10秒超时
             onload: function(response) {
                 try {
                     if (response.status === 200) {
                         const remoteList = JSON.parse(response.responseText);
                         if (Array.isArray(remoteList) && remoteList.length > 0) {
-                            // 修改点：合并远程列表和默认列表，去重
-                            const mergedList = [...new Set([...remoteList, ...DEFAULT_APIS])];
-                            activeApiList = mergedList;
-                            console.log("云端 API 更新成功，合并后节点数:", activeApiList.length);
-                            console.log("可用节点:", activeApiList);
+                            // 保存远程列表
+                            remoteApiList = remoteList;
+                            console.log("云端 API 获取成功，远程节点数:", remoteApiList.length);
+                            console.log("远程节点:", remoteApiList);
+                        } else {
+                            console.warn("远程配置返回空数组，仅使用默认列表");
                         }
+                    } else {
+                        console.warn("远程配置请求失败，状态码:", response.status, "仅使用默认列表");
                     }
                 } catch (e) {
-                    console.warn("远程配置解析失败，使用默认列表。", e);
+                    console.warn("远程配置解析失败，仅使用默认列表。", e);
+                } finally {
+                    configLoaded = true;
                 }
             },
             onerror: function(err) {
-                console.warn("远程配置请求失败，使用默认列表。", err);
+                console.warn("远程配置请求失败，仅使用默认列表。", err);
+                configLoaded = true;
+            },
+            ontimeout: function() {
+                console.warn("远程配置请求超时，仅使用默认列表");
+                configLoaded = true;
             }
         });
     }
@@ -136,13 +155,37 @@
         });
     }
 
-    // --- 核心转存逻辑 (已修改：移除自动跳转，改为手动点击) ---
+    // --- 核心转存逻辑 ---
     function handleTransfer(item, btn, errorDiv, container, closeFunc) {
+        // 修改点：等待配置加载完成
+        if (!configLoaded) {
+            showToast("配置加载中，请稍后...");
+            setTimeout(() => handleTransfer(item, btn, errorDiv, container, closeFunc), 500);
+            return;
+        }
+
         const full = makeFullLink(item.url, item.code);
 
-        const API_POOL = [...activeApiList];
-        // 修改点：在开始前输出当前使用的节点池
-        console.log("当前可用API节点池:", API_POOL);
+        // 优先使用远程节点，失败后使用内置节点
+        let API_POOL = [];
+
+        if (remoteApiList.length > 0) {
+            // 优先使用远程节点
+            API_POOL = [...remoteApiList];
+            console.log("优先使用远程节点池:", API_POOL);
+        } else {
+            // 没有远程节点，使用内置节点
+            API_POOL = [...DEFAULT_APIS];
+            console.log("使用内置节点池:", API_POOL);
+        }
+
+        // 添加重试节点：如果远程节点失败，添加内置节点作为重试
+        const fallbackPool = [...DEFAULT_APIS];
+        const totalRetries = API_POOL.length + fallbackPool.length;
+
+        console.log("当前API节点池:", API_POOL);
+        console.log("备用节点池:", fallbackPool);
+        console.log("总重试次数:", totalRetries);
 
         const initialApi = selectNextApiBase(API_POOL);
         console.log("首次尝试使用节点:", initialApi);
@@ -172,17 +215,28 @@
             }
         };
 
-        const tryReq = (retries, api, pool) => {
-            console.log(`尝试第${API_POOL.length + 1 - retries + 1}次, 使用节点: ${api}, 剩余重试次数: ${retries-1}`);
+        const tryReq = (retries, api, currentPool, fallbackPool) => {
+            console.log(`尝试第${totalRetries - retries + 1}次, 使用节点: ${api}, 剩余重试次数: ${retries-1}`);
 
             const fail = (reason) => {
-                console.log(`节点 ${api} 失败: ${reason}, 剩余节点: ${pool.length}`);
-                if (retries > 1 && pool.length > 0) {
-                    const next = selectNextApiBase(pool);
+                console.log(`节点 ${api} 失败: ${reason}`);
+
+                // 检查当前池是否还有节点
+                if (currentPool.length > 0) {
+                    const next = selectNextApiBase(currentPool);
                     console.log("切换至节点:", next);
                     showToast("切换线路重试...");
-                    setTimeout(() => tryReq(retries - 1, next, pool), 1000);
-                } else {
+                    setTimeout(() => tryReq(retries - 1, next, currentPool, fallbackPool), 1000);
+                }
+                // 如果当前池空了但还有备用池，切换到备用池
+                else if (fallbackPool.length > 0 && retries > 1) {
+                    console.log("当前池已空，切换到备用池");
+                    const next = selectNextApiBase(fallbackPool);
+                    console.log("切换到备用节点:", next);
+                    showToast("切换到备用线路...");
+                    setTimeout(() => tryReq(retries - 1, next, [], fallbackPool), 1000);
+                }
+                else {
                     console.log("所有节点尝试失败");
                     finish(false, reason);
                 }
@@ -204,7 +258,8 @@
                 } else fail(r1.response?.message || "创建文件夹失败");
             }, () => fail("网络中断"));
         };
-        tryReq(API_POOL.length + 1, initialApi, API_POOL);
+
+        tryReq(totalRetries, initialApi, API_POOL, fallbackPool);
     }
 
     // --- UI 渲染 ---
