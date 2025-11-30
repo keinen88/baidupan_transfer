@@ -19,9 +19,8 @@
 
     // 1. 【内置默认列表】 (当远程获取失败时使用此列表兜底)
     const DEFAULT_APIS = [
-        "https://dl.20250823.xyz",
-        "https://dl1.20250823.xyz",
-        "https://dl2.20250823.xyz"
+        "https://dl2.20250823.xyz",
+        "https://dl1.20250823.xyz"
     ];
 
     // 2. 【远程配置地址】 (脚本启动时会自动从此地址更新 API 列表)
@@ -47,16 +46,19 @@
                     if (response.status === 200) {
                         const remoteList = JSON.parse(response.responseText);
                         if (Array.isArray(remoteList) && remoteList.length > 0) {
-                            activeApiList = remoteList;
-                            console.log("云端 API 更新成功，加载节点数:", activeApiList.length);
+                            // 修改点：合并远程列表和默认列表，去重
+                            const mergedList = [...new Set([...remoteList, ...DEFAULT_APIS])];
+                            activeApiList = mergedList;
+                            console.log("云端 API 更新成功，合并后节点数:", activeApiList.length);
+                            console.log("可用节点:", activeApiList);
                         }
                     }
                 } catch (e) {
-                    console.warn("远程配置解析失败，维持默认列表。", e);
+                    console.warn("远程配置解析失败，使用默认列表。", e);
                 }
             },
             onerror: function(err) {
-                console.warn("远程配置请求失败，维持默认列表。", err);
+                console.warn("远程配置请求失败，使用默认列表。", err);
             }
         });
     }
@@ -139,7 +141,11 @@
         const full = makeFullLink(item.url, item.code);
 
         const API_POOL = [...activeApiList];
+        // 修改点：在开始前输出当前使用的节点池
+        console.log("当前可用API节点池:", API_POOL);
+
         const initialApi = selectNextApiBase(API_POOL);
+        console.log("首次尝试使用节点:", initialApi);
 
         if (!initialApi) return showToast("暂无可用 API");
 
@@ -148,20 +154,16 @@
 
         const folder = "/" + new Date().toISOString().replace(/[:.]/g,'-') + (item.code ? "_" + item.code : "");
 
-        // 修改点 1: finish 函数接收 targetUrl 参数
         const finish = (success, msg, targetUrl) => {
             if (success) {
-                btn.textContent = "打开"; // 修改点 2: 按钮文字改为“打开”
-                btn.disabled = false;     // 修改点 3: 重新启用按钮
+                btn.textContent = "打开";
+                btn.disabled = false;
                 btn.style.fontWeight = "bold";
-                btn.style.color = "#008000"; // 绿色文字提示成功
+                btn.style.color = "#008000";
 
-                // 修改点 4: 覆盖按钮点击事件，改为打开新窗口
                 btn.onclick = () => window.open(targetUrl, "_blank");
 
-                showToast("转存成功，请点击“打开”");
-                // 修改点 5: 移除自动关闭面板的代码，以便用户点击
-                // setTimeout(() => closeFunc(container), 1500); 
+                showToast("转存成功，请点击'打开'");
             } else {
                 btn.textContent = "重试";
                 btn.disabled = false;
@@ -171,12 +173,19 @@
         };
 
         const tryReq = (retries, api, pool) => {
+            console.log(`尝试第${API_POOL.length + 1 - retries + 1}次, 使用节点: ${api}, 剩余重试次数: ${retries-1}`);
+
             const fail = (reason) => {
+                console.log(`节点 ${api} 失败: ${reason}, 剩余节点: ${pool.length}`);
                 if (retries > 1 && pool.length > 0) {
                     const next = selectNextApiBase(pool);
+                    console.log("切换至节点:", next);
                     showToast("切换线路重试...");
                     setTimeout(() => tryReq(retries - 1, next, pool), 1000);
-                } else finish(false, reason);
+                } else {
+                    console.log("所有节点尝试失败");
+                    finish(false, reason);
+                }
             };
 
             gmPost(`${api}/api/fs/mkdir`, { path: folder }, (r1) => {
@@ -186,9 +195,11 @@
                         data: { path: "/百度网盘/分享/" + folder, url: full }
                     }, (r2) => {
                         if (r2.response?.code === 200 && r2.response?.data?.errno === 0) {
-                            // 修改点 6: 成功后不直接 open，而是传入 url 给 finish 处理
+                            console.log(`节点 ${api} 转存成功`);
                             finish(true, null, api + folder);
-                        } else fail(r2.response?.message || "转存失败(API错误)");
+                        } else {
+                            fail(r2.response?.message || "转存失败(API错误)");
+                        }
                     }, () => fail("网络中断"));
                 } else fail(r1.response?.message || "创建文件夹失败");
             }, () => fail("网络中断"));
