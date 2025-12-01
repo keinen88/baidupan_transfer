@@ -8,7 +8,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @connect      dl1.20250823.xyz
+// @connect      api.20250823.xyz
 // ==/UserScript==
 
 (function() {
