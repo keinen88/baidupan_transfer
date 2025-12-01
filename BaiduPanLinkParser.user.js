@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘链接提取与转存
 // @version      2025.12.01
-// @description  提取选中的链接并自动转存。
+// @description  提取选中的链接并自动转存，支持 F4 快捷键手动输入（链接+提取码双框）和面板拖动。
 // @license      MIT
 // @match        *://*/*
 // @grant        GM_setClipboard
@@ -17,8 +17,9 @@
     // ================= 配置 =================
 
     const API_BASE = "https://api.20250823.xyz";
+    const HOTKEY = 'F4';
 
-    // ================= 样式 (保持一致) =================
+    // ================= 样式 (保持一致 + 新增输入框样式) =================
     const STYLES = `
         #bd-helper-panel {
             position: fixed; z-index: 9999999;
@@ -31,6 +32,9 @@
         .p-head {
             background: #f5f5f5; padding: 10px 15px; font-weight: 600;
             border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; align-items: center;
+            /* 允许拖动 */
+            cursor: move;
+            user-select: none; /* 拖动时禁止文本选中 */
         }
         .p-close { cursor: pointer; font-size: 18px; color: #999; transition: color 0.2s; }
         .p-close:hover { color: #f5222d; }
@@ -42,6 +46,10 @@
         .p-btn { cursor: pointer; background: #fff; border: 1px solid #d9d9d9; padding: 4px 12px; border-radius: 4px; font-size: 12px; }
         .p-btn-primary { background: #1890ff; border-color: #1890ff; color: #fff; }
         .p-btn-block { width: 100%; padding: 8px; margin-top: 10px; }
+        /* 通用输入框样式 */
+        .p-input { width: 100%; box-sizing: border-box; border: 1px solid #d9d9d9; border-radius: 4px; padding: 8px; font-family: inherit; font-size: 12px; margin-bottom: 10px;}
+        .p-input:focus { border-color: #40a9ff; outline: 0; box-shadow: 0 0 0 2px rgba(24,144,255,0.2); }
+
         .p-foot { background: #f9f9f9; padding: 8px; text-align: center; border-top: 1px solid #eee; }
 
         .result-row { padding: 10px 15px; border-bottom: 1px solid #eee; display: flex; gap: 10px; align-items: center; }
@@ -63,7 +71,6 @@
         const codes = [];
         while ((m = codeRegex.exec(text)) !== null) codes.push(m[1]);
 
-        // 简单匹配：倒序结合
         let codeIndex = codes.length - 1;
         return links.reverse().map(l => {
             let code = null;
@@ -80,11 +87,9 @@
         return url + (url.includes('?') ? '&' : '?') + 'pwd=' + encodeURIComponent(code);
     }
 
-    // ================= 核心：调用 API =================
+    // ================= 核心：调用 API (逻辑不变) =================
     function callGoApi(fullUrl, container) {
         const bodyDiv = container.querySelector('.p-body');
-
-        // 修改点：移除“本地服务”和“main.exe”提示，改为通用的云端提示
         bodyDiv.innerHTML = `
             <div class="loading-msg">
                 🚀 正在请求云端解析...<br>
@@ -105,14 +110,12 @@
                     return bodyDiv.innerHTML = `<div class="error-msg">解析响应失败，非 JSON 格式</div>`;
                 }
 
-                // === 处理 429 冷却 ===
                 if (res.status === 429 || json.code === 429) {
                     const remaining = (json.data && json.data.remaining) ? json.data.remaining : 120;
                     showCooldown(bodyDiv, remaining, fullUrl, container);
                     return;
                 }
 
-                // === 处理 成功 ===
                 if (json.code === 200 && json.data && json.data.folder) {
                     renderResultList(json.data.folder, container);
                 } else {
@@ -121,16 +124,14 @@
                 }
             },
             onerror: () => {
-                // 修改点：模糊化错误提示，隐藏端口信息
                 bodyDiv.innerHTML = `<div class="error-msg">🚫 服务器连接失败<br>请检查网络或服务端状态</div>`;
             }
         });
     }
 
-    // ================= 显示倒计时界面 =================
+    // (showCooldown 和 renderResultList 保持不变)
     function showCooldown(bodyDiv, seconds, fullUrl, container) {
         let timeLeft = seconds;
-
         const updateUI = () => {
             bodyDiv.innerHTML = `
                 <div class="cd-msg">
@@ -143,14 +144,11 @@
                 </div>
             `;
         };
-
         updateUI();
-
         const timer = setInterval(() => {
             timeLeft--;
             if (timeLeft <= 0) {
                 clearInterval(timer);
-                // 倒计时结束，允许重试
                 bodyDiv.innerHTML = `
                     <div class="cd-msg" style="color:#52c41a; background:#f6ffed;">
                         ✅ 排队结束<br>您可以重新尝试了
@@ -167,7 +165,6 @@
         }, 1000);
     }
 
-    // ================= 列表渲染 =================
     function renderResultList(files, container) {
         const body = container.querySelector('.p-body');
         const foot = container.querySelector('.p-foot');
@@ -192,6 +189,52 @@
         };
     }
 
+    // ================= 手动输入界面 (双框) =================
+    function renderManualInput(container) {
+        const body = container.querySelector('.p-body');
+        const foot = container.querySelector('.p-foot');
+
+        body.innerHTML = `
+            <div style="padding: 15px;">
+                <div style="margin-bottom:8px; font-weight:500;">网盘分享链接 (URL)</div>
+                <input type="text" class="p-input" id="manual-url" placeholder="例如：https://pan.baidu.com/s/xxxxxx">
+
+                <div style="margin-bottom:8px; font-weight:500;">提取码 (4位)</div>
+                <input type="text" class="p-input" id="manual-code" placeholder="例如：1234">
+
+                <div style="margin-top:0px; color:#999; font-size:12px;">注：如果链接中已包含密码，可不填提取码。</div>
+            </div>
+        `;
+
+        foot.innerHTML = `<button class="p-btn p-btn-primary p-btn-block" id="manual-submit">开始解析</button>`;
+
+        const urlInput = container.querySelector('#manual-url');
+        const codeInput = container.querySelector('#manual-code');
+
+        setTimeout(() => { if(urlInput) urlInput.focus(); }, 100);
+
+        container.querySelector('#manual-submit').onclick = () => {
+            const url = urlInput.value.trim();
+            let code = codeInput.value.trim();
+
+            if (!url) return alert("请输入网盘链接");
+
+            if (!url.startsWith('http') || !/pan\.baidu\.com/i.test(url)) {
+                return alert("链接格式不正确，请确保是 pan.baidu.com 的链接");
+            }
+
+            if (/[?&]pwd=/i.test(url)) {
+                code = null;
+            } else if (code.length !== 4 && code.length !== 0) {
+                 return alert("提取码通常是4位数字或字母组合");
+            }
+
+            const items = [{ url: url, code: code || null }];
+
+            renderLinkList(container, items);
+        };
+    }
+
     // ================= 主入口 =================
     let panelContainer = null;
     let lastMouseX = 0, lastMouseY = 0;
@@ -203,7 +246,7 @@
             html += `
                 <div class="p-item">
                     <div class="p-url">${it.url}</div>
-                    <div class="p-meta">${it.code ? `提取码: ${it.code}` : ''}</div>
+                    <div class="p-meta">${it.code ? `提取码: ${it.code}` : '<span style="color:#ff4d4f">无提取码</span>'}</div>
                     <button class="p-btn p-btn-primary p-btn-block" id="btn-run-${i}">极速解析</button>
                 </div>
             `;
@@ -212,26 +255,82 @@
         items.forEach((it, i) => {
             container.querySelector(`#btn-run-${i}`).onclick = () => callGoApi(makeFullLink(it.url, it.code), container);
         });
+
+        const foot = container.querySelector('.p-foot');
+        if (items.length === 1 && foot.innerHTML.indexOf('copy-all') === -1) {
+            foot.innerHTML = `<button class="p-btn p-btn-block" id="manual-reset" style="margin: 0; background:#f0f0f0;">返回手动输入</button>`;
+            container.querySelector('#manual-reset').onclick = () => renderManualInput(container);
+        }
     }
 
-    function showPanel(items, x, y) {
+    function showPanel(items, x, y, isManual = false) {
         if(panelContainer) panelContainer.remove();
         const container = document.createElement('div');
         container.id = 'bd-helper-panel';
+
         if(x + 450 > window.innerWidth) x = window.innerWidth - 470;
+        if(y + 400 > window.innerHeight) y = window.innerHeight - 420;
+
         container.style.top = y + 'px';
         container.style.left = x + 'px';
 
-        // 修改点：面板标题去本地化
-        container.innerHTML = `<div class="p-head"><span>网盘直链提取助手</span><span class="p-close">×</span></div><div class="p-body"></div><div class="p-foot"></div>`;
+        container.innerHTML = `<div class="p-head"><span>网盘直链提取助手 ${isManual ? '(手动模式)' : ''}</span><span class="p-close">×</span></div><div class="p-body"></div><div class="p-foot"></div>`;
 
         document.body.appendChild(container);
         panelContainer = container;
         container.querySelector('.p-close').onclick = () => { container.remove(); panelContainer = null; };
-        renderLinkList(container, items);
+
+        // ======================== 拖动功能实现 ========================
+        const header = container.querySelector('.p-head');
+        let isDragging = false;
+        let startX, startY, startLeft, startTop;
+
+        header.onmousedown = (e) => {
+            // 确保只处理左键点击
+            if (e.button !== 0) return;
+
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            startLeft = container.offsetLeft;
+            startTop = container.offsetTop;
+
+            // 拖动过程中更改鼠标样式
+            header.style.cursor = 'grabbing';
+
+            document.onmousemove = (e) => {
+                if (!isDragging) return;
+                const dx = e.clientX - startX;
+                const dy = e.clientY - startY;
+
+                container.style.left = (startLeft + dx) + 'px';
+                container.style.top = (startTop + dy) + 'px';
+            };
+
+            document.onmouseup = () => {
+                if (isDragging) {
+                    isDragging = false;
+                    header.style.cursor = 'move'; // 拖动结束后恢复
+                    document.onmousemove = null;
+                    document.onmouseup = null;
+                }
+            };
+            // 阻止默认文本选择行为
+            e.preventDefault();
+        };
+        // ======================== 拖动功能结束 ========================
+
+        if (isManual || items.length === 0) {
+            renderManualInput(container);
+        } else {
+            renderLinkList(container, items);
+        }
     }
 
+    // 鼠标坐标记录 (用于 'copy' 触发)
     document.addEventListener('mouseup', e => { lastMouseX = e.clientX; lastMouseY = e.clientY; });
+
+    // 自动复制监听
     document.addEventListener('copy', () => {
         setTimeout(() => {
             const text = window.getSelection().toString();
@@ -241,4 +340,15 @@
             }
         }, 100);
     });
+
+    // 快捷键监听 (默认 F4)
+    document.addEventListener('keydown', (e) => {
+        if (e.key === HOTKEY && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+            e.preventDefault();
+            const x = (window.innerWidth - 450) / 2;
+            const y = (window.innerHeight - 300) / 2;
+            showPanel([], x, y, true);
+        }
+    });
+
 })();
