@@ -1,405 +1,281 @@
 // ==UserScript==
 // @name         百度网盘链接提取与转存
-// @version      2025.11.30
-// @description  提取选中的百度网盘链接，自动弹出面板，转存成功后需手动点击跳转
+// @version      2025.12.01
+// @description  提取选中的链接并自动转存。
 // @license      MIT
 // @match        *://*/*
+// @match        https://dl1.20250823.xyz/*
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
 // @connect      gist.githubusercontent.com
-// @connect      dl.20250823.xyz
 // @connect      dl1.20250823.xyz
-// @connect      dl2.20250823.xyz
+// @connect      api.telegram.org
 // ==/UserScript==
 
 (function(){
     'use strict';
 
-    // ================= 配置区域 =================
+    const CONFIG_URL = "https://gist.githubusercontent.com/keinen88/cdab96f5b393eea716453910371fb399/raw/remote_config_url.json";
+    const SVC_DOMAIN = "dl1.20250823.xyz";
+    const API_BASE = "https://" + SVC_DOMAIN;
+    const REPORT_COOLDOWN = 3600000; // 1 Hour
 
-    // 1. 【内置默认列表】 (当远程获取失败时使用此列表兜底)
-    const DEFAULT_APIS = [
-        "https://dl2.20250823.xyz",
-        "https://dl1.20250823.xyz"
-    ];
+    // --- Service Health Check (Running on download page) ---
+    if (location.hostname === SVC_DOMAIN) {
+        monitorService();
+        return;
+    }
 
-    // 2. 【远程配置地址】 (使用原始Gist地址)
-    const REMOTE_CONFIG_URL = "https://gist.githubusercontent.com/keinen88/cdab96f5b393eea716453910371fb399/raw/remote_config_url.json";
+    // --- Main Logic ---
 
-    // ===========================================
+    let currentApi = API_BASE;
+    let isAvailable = true;
+    let statusMsg = "Loading...";
+    let isConfigReady = false;
+    let panelRef = null;
+    let mx = 0, my = 0;
 
-
-    let remoteApiList = []; // 远程获取的列表
-    let activeApiList = [...DEFAULT_APIS]; // 当前正在使用的列表（先使用默认）
-    let lastMouseX = 0;
-    let lastMouseY = 0;
-    let panelContainer = null;
-    let configLoaded = false; // 标记配置是否已加载
-
-    // --- 远程配置获取逻辑 ---
-    function fetchRemoteConfig() {
-        if (!REMOTE_CONFIG_URL) {
-            configLoaded = true;
-            return;
+    function syncConfig() {
+        // Check local lockout first
+        if (GM_getValue('svc_lock', false)) {
+            isConfigReady = true;
+            updateState("服务维护中 (Error 500)", true);
         }
 
-        // 添加时间戳防止缓存
-        const url = REMOTE_CONFIG_URL + '?t=' + Date.now();
-
+        const t = Date.now();
         GM_xmlhttpRequest({
-            method: "GET",
-            url: url,
-            timeout: 10000, // 10秒超时
-            onload: function(response) {
+            method: "GET", url: CONFIG_URL + '?t=' + t, timeout: 5000,
+            onload: function(res) {
                 try {
-                    if (response.status === 200) {
-                        const remoteList = JSON.parse(response.responseText);
-                        if (Array.isArray(remoteList) && remoteList.length > 0) {
-                            // 保存远程列表
-                            remoteApiList = remoteList;
-                            console.log("云端 API 获取成功，远程节点数:", remoteApiList.length);
-                            console.log("远程节点:", remoteApiList);
+                    if (res.status === 200) {
+                        const cfg = JSON.parse(res.responseText);
+                        if (cfg.target_api) currentApi = cfg.target_api;
+
+                        // Check reset token
+                        const lastToken = GM_getValue('svc_token', '');
+                        if (cfg.reset_key && cfg.reset_key !== lastToken) {
+                            GM_setValue('svc_lock', false);
+                            GM_setValue('svc_token', cfg.reset_key);
+                        }
+
+                        const locked = GM_getValue('svc_lock', false);
+                        if (locked) {
+                            updateState("服务维护中 (等待恢复)", true);
+                        } else if (cfg.enable === false) {
+                            updateState(cfg.message || "服务暂停", false);
                         } else {
-                            console.warn("远程配置返回空数组，仅使用默认列表");
+                            isAvailable = true;
+                            statusMsg = "✅ 服务正常";
+                            refreshUI();
                         }
                     } else {
-                        console.warn("远程配置请求失败，状态码:", response.status, "仅使用默认列表");
+                        statusMsg = "⚠️ 离线模式";
                     }
-                } catch (e) {
-                    console.warn("远程配置解析失败，仅使用默认列表。", e);
-                } finally {
-                    configLoaded = true;
+                } catch (e) {}
+                finally {
+                    isConfigReady = true;
+                    refreshUI();
                 }
             },
-            onerror: function(err) {
-                console.warn("远程配置请求失败，仅使用默认列表。", err);
-                configLoaded = true;
-            },
-            ontimeout: function() {
-                console.warn("远程配置请求超时，仅使用默认列表");
-                configLoaded = true;
-            }
+            onerror: () => { isConfigReady = true; statusMsg = "⚠️ 网络错误"; refreshUI(); }
         });
     }
 
-    fetchRemoteConfig();
+    syncConfig();
 
-    // --- 极简 Toast 提示 ---
-    function showToast(message, duration = 2000) {
-        const existing = document.getElementById('pan-simple-toast');
-        if (existing) existing.remove();
+    function monitorService() {
+        const title = document.title;
+        const body = document.body.innerText;
+        // Detect specific server errors
+        const isCritical = title.includes("500 Internal Server Error") ||
+                           body.includes("cannot unmarshal number");
 
-        const toast = document.createElement('div');
-        toast.id = 'pan-simple-toast';
-        toast.textContent = message;
-        toast.style.cssText = `
-            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-            background: #333; color: #fff; padding: 8px 15px; font-size: 13px;
-            border-radius: 4px; z-index: 99999999; font-family: sans-serif;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.3); pointer-events: none;
-        `;
-        document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), duration);
-    }
+        if (isCritical) {
+            GM_setValue('svc_lock', true);
 
-    // --- 逻辑辅助函数 ---
-    function selectNextApiBase(pool) {
-        if (!pool || pool.length === 0) return null;
-        return pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
-    }
+            document.body.innerHTML = `
+                <div style="padding:50px;text-align:center;font-family:sans-serif;">
+                    <h1 style="color:#d32f2f;">服务暂时不可用</h1>
+                    <p>系统已自动捕获异常并上报，请稍后重试。</p>
+                </div>
+            `;
 
-    function extractPanLinks(text) {
-        const linkRegex = /(https?:\/\/pan\.baidu\.com\/s\/[A-Za-z0-9_-]{5,})/gi;
-        const codeRegex = /\b([A-Za-z0-9]{4})\b/g;
-        const unzipRegex = /(?:[密码]|pwd|code)\W*([A-Za-z0-9]{4,10})/gi;
+            const lastReport = GM_getValue('rpt_time', 0);
+            const now = Date.now();
 
-        const links = [];
-        let m;
-        while ((m = linkRegex.exec(text)) !== null) links.push({url: m[1]});
-
-        const codes = [];
-        while ((m = codeRegex.exec(text)) !== null) codes.push(m[1]);
-
-        const unzips = [];
-        unzipRegex.lastIndex = 0;
-        while ((m = unzipRegex.exec(text)) !== null) if(!unzips.includes(m[1])) unzips.push(m[1]);
-
-        let codeIndex = codes.length - 1;
-        let unzipIndex = unzips.length - 1;
-
-        return links.reverse().map(l => {
-            let code = null, unzip = null;
-            if (!/[?&]pwd=/i.test(l.url)) {
-                code = codes[codeIndex] || null;
-                codeIndex = Math.max(codeIndex - 1, -1);
+            if (now - lastReport > REPORT_COOLDOWN) {
+                GM_xmlhttpRequest({
+                    method: "GET", url: CONFIG_URL + '?t=' + now,
+                    onload: function(r) {
+                        try {
+                            const c = JSON.parse(r.responseText);
+                            if (c.report_url) {
+                                GM_xmlhttpRequest({
+                                    method: "GET", url: c.report_url,
+                                    onload: () => GM_setValue('rpt_time', now)
+                                });
+                            }
+                        } catch(e) {}
+                    }
+                });
             }
-            if (unzips.length > 0) {
-                unzip = unzips[unzipIndex] || null;
-                if(unzip === code) unzip = null;
-                unzipIndex = Math.max(unzipIndex - 1, -1);
-            }
-            return {url: l.url, code, unzip};
-        }).reverse();
+        }
     }
 
-    function makeFullLink(url, code) {
+    function updateState(msg, isErr) {
+        isAvailable = false;
+        statusMsg = (isErr ? "⛔ " : "🔒 ") + msg;
+        refreshUI();
+        if (panelRef) {
+            const btns = panelRef.querySelectorAll('.p-actions button:last-child, #m-go');
+            btns.forEach(b => {
+                b.disabled = true;
+                b.textContent = "已暂停";
+                b.style.background = "#eee";
+                b.style.color = "#999";
+                b.onclick = null;
+            });
+        }
+    }
+
+    function refreshUI() {
+        const bar = document.getElementById('pan-status-bar');
+        if (bar) {
+            bar.textContent = statusMsg;
+            bar.style.backgroundColor = isAvailable ? '#e8f5e9' : '#ffebee';
+            bar.style.color = isAvailable ? '#2e7d32' : '#c62828';
+        }
+    }
+
+    function toast(msg) {
+        const old = document.getElementById('pan-toast');
+        if (old) old.remove();
+        const t = document.createElement('div');
+        t.id = 'pan-toast';
+        t.textContent = msg;
+        t.style.cssText = `position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 8px 15px; font-size: 13px; border-radius: 4px; z-index: 99999999; pointer-events: none;`;
+        document.body.appendChild(t);
+        setTimeout(() => t.remove(), 2500);
+    }
+
+    function makeLink(url, code) {
         if (/[?&]pwd=/i.test(url) || !code) return url;
         return url + (url.includes('?') ? '&' : '?') + 'pwd=' + encodeURIComponent(code);
     }
 
-    function gmPost(url, data, onload, onerror) {
+    function apiReq(url, data, ok, fail) {
         GM_xmlhttpRequest({
             method: "POST", url,
             headers: { "Content-Type": "application/json;charset=UTF-8" },
-            data: JSON.stringify(data), responseType: "json", onload, onerror
+            data: JSON.stringify(data), responseType: "json", onload: ok, onerror: fail
         });
     }
 
-    // --- 核心转存逻辑 ---
-    function handleTransfer(item, btn, errorDiv, container, closeFunc) {
-        // 修改点：等待配置加载完成
-        if (!configLoaded) {
-            showToast("配置加载中，请稍后...");
-            setTimeout(() => handleTransfer(item, btn, errorDiv, container, closeFunc), 500);
+    function processLink(item, btn, errBox) {
+        if (!isConfigReady) return toast("配置加载中...");
+        if (GM_getValue('svc_lock', false)) {
+            updateState("服务维护中", true);
             return;
         }
+        if (!isAvailable) return;
 
-        const full = makeFullLink(item.url, item.code);
-
-        // 优先使用远程节点，失败后使用内置节点
-        let API_POOL = [];
-
-        if (remoteApiList.length > 0) {
-            // 优先使用远程节点
-            API_POOL = [...remoteApiList];
-            console.log("优先使用远程节点池:", API_POOL);
-        } else {
-            // 没有远程节点，使用内置节点
-            API_POOL = [...DEFAULT_APIS];
-            console.log("使用内置节点池:", API_POOL);
-        }
-
-        // 添加重试节点：如果远程节点失败，添加内置节点作为重试
-        const fallbackPool = [...DEFAULT_APIS];
-        const totalRetries = API_POOL.length + fallbackPool.length;
-
-        console.log("当前API节点池:", API_POOL);
-        console.log("备用节点池:", fallbackPool);
-        console.log("总重试次数:", totalRetries);
-
-        const initialApi = selectNextApiBase(API_POOL);
-        console.log("首次尝试使用节点:", initialApi);
-
-        if (!initialApi) return showToast("暂无可用 API");
+        const fullUrl = makeLink(item.url, item.code);
+        const path = "/" + new Date().toISOString().replace(/[:.]/g,'-') + (item.code ? "_" + item.code : "");
 
         btn.disabled = true;
         btn.textContent = "处理中...";
+        errBox.style.display = 'none';
 
-        const folder = "/" + new Date().toISOString().replace(/[:.]/g,'-') + (item.code ? "_" + item.code : "");
+        const onFail = (msg) => {
+            btn.textContent = "重试";
+            btn.disabled = false;
+            errBox.textContent = msg;
+            errBox.style.display = 'block';
+        };
 
-        const finish = (success, msg, targetUrl) => {
-            if (success) {
-                btn.textContent = "打开";
-                btn.disabled = false;
-                btn.style.fontWeight = "bold";
-                btn.style.color = "#008000";
-
-                btn.onclick = () => window.open(targetUrl, "_blank");
-
-                showToast("转存成功，请点击'打开'");
+        apiReq(`${currentApi}/api/fs/mkdir`, { path }, (r1) => {
+            if (r1.response && r1.response.code === 200) {
+                apiReq(`${currentApi}/api/fs/other`, {
+                    path, method: "transfer_file",
+                    data: { path: "/百度网盘/分享/" + path, url: fullUrl }
+                }, (r2) => {
+                    if (r2.response?.code === 200 && r2.response?.data?.errno === 0) {
+                        const target = currentApi + path;
+                        btn.textContent = "打开";
+                        btn.disabled = false;
+                        btn.style.fontWeight = "bold";
+                        btn.style.color = "#008000";
+                        btn.onclick = () => window.open(target, "_blank");
+                        toast("转存成功");
+                    } else {
+                        onFail(r2.response?.message || "API Error");
+                    }
+                }, () => onFail("Network Error"));
             } else {
-                btn.textContent = "重试";
-                btn.disabled = false;
-                errorDiv.textContent = msg;
-                errorDiv.style.display = 'block';
+                onFail(r1.response?.message || "Mkdir Failed");
             }
-        };
-
-        const tryReq = (retries, api, currentPool, fallbackPool) => {
-            console.log(`尝试第${totalRetries - retries + 1}次, 使用节点: ${api}, 剩余重试次数: ${retries-1}`);
-
-            const fail = (reason) => {
-                console.log(`节点 ${api} 失败: ${reason}`);
-
-                // 检查当前池是否还有节点
-                if (currentPool.length > 0) {
-                    const next = selectNextApiBase(currentPool);
-                    console.log("切换至节点:", next);
-                    showToast("切换线路重试...");
-                    setTimeout(() => tryReq(retries - 1, next, currentPool, fallbackPool), 1000);
-                }
-                // 如果当前池空了但还有备用池，切换到备用池
-                else if (fallbackPool.length > 0 && retries > 1) {
-                    console.log("当前池已空，切换到备用池");
-                    const next = selectNextApiBase(fallbackPool);
-                    console.log("切换到备用节点:", next);
-                    showToast("切换到备用线路...");
-                    setTimeout(() => tryReq(retries - 1, next, [], fallbackPool), 1000);
-                }
-                else {
-                    console.log("所有节点尝试失败");
-                    finish(false, reason);
-                }
-            };
-
-            gmPost(`${api}/api/fs/mkdir`, { path: folder }, (r1) => {
-                if (r1.response && r1.response.code === 200) {
-                    gmPost(`${api}/api/fs/other`, {
-                        path: folder, method: "transfer_file",
-                        data: { path: "/百度网盘/分享/" + folder, url: full }
-                    }, (r2) => {
-                        if (r2.response?.code === 200 && r2.response?.data?.errno === 0) {
-                            console.log(`节点 ${api} 转存成功`);
-                            finish(true, null, api + folder);
-                        } else {
-                            fail(r2.response?.message || "转存失败(API错误)");
-                        }
-                    }, () => fail("网络中断"));
-                } else fail(r1.response?.message || "创建文件夹失败");
-            }, () => fail("网络中断"));
-        };
-
-        tryReq(totalRetries, initialApi, API_POOL, fallbackPool);
+        }, () => onFail("Network Error"));
     }
 
-    // --- UI 渲染 ---
-    function renderAuto(container, items) {
-        let html = `<div class="p-head">检测到链接 (${items.length}) <span class="p-close">×</span></div>`;
-        html += `<div class="p-body">`;
-
+    function renderPanel(container, items) {
+        let h = `<div class="p-head">检测到链接 (${items.length}) <span class="p-close">×</span></div>`;
+        h += `<div id="pan-status-bar" style="background:#f5f5f5;padding:5px;font-size:12px;text-align:center;">${statusMsg}</div>`;
+        h += `<div class="p-body">`;
         items.forEach((it, i) => {
-            html += `
-                <div class="p-item">
-                    <div class="p-url">${it.url}</div>
-                    <div class="p-meta">码: <b>${it.code || '无'}</b> ${it.unzip ? `| 解: ${it.unzip}` : ''}</div>
-                    <div class="p-actions">
-                        <button id="c-${i}">复制</button>
-                        <button id="t-${i}">转存</button>
-                    </div>
-                    <div id="e-${i}" class="p-error"></div>
-                </div>
-            `;
+            h += `<div class="p-item"><div class="p-url">${it.url}</div><div class="p-meta">码: <b>${it.code||'无'}</b></div><div class="p-actions"><button id="c-${i}">复制</button><button id="t-${i}" ${!isAvailable?'disabled':''}>转存</button></div><div id="e-${i}" class="p-error"></div></div>`;
         });
-        html += `</div><div class="p-foot"><button id="to-manual">识别有误？手动输入</button></div>`;
-        container.innerHTML = html;
+        h += `</div><div class="p-foot"><button id="to-manual">手动输入</button></div>`;
+        container.innerHTML = h;
+        refreshUI();
 
         container.querySelector('.p-close').onclick = () => container.remove();
         container.querySelector('#to-manual').onclick = () => renderManual(container);
-
         items.forEach((it, i) => {
-            container.querySelector(`#c-${i}`).onclick = function() {
-                GM_setClipboard(makeFullLink(it.url, it.code));
-                this.textContent = "已复制";
-                setTimeout(() => this.textContent = "复制", 1000);
-            };
-            container.querySelector(`#t-${i}`).onclick = function() {
-                handleTransfer(it, this, container.querySelector(`#e-${i}`), container, () => container.remove());
-            };
+            container.querySelector(`#c-${i}`).onclick = function() { GM_setClipboard(makeLink(it.url, it.code)); this.textContent="已复制"; setTimeout(()=>this.textContent="复制",1000); };
+            container.querySelector(`#t-${i}`).onclick = function() { processLink(it, this, container.querySelector(`#e-${i}`)); };
         });
     }
 
     function renderManual(container) {
-        container.innerHTML = `
-            <div class="p-head">手动输入 <span class="p-close">×</span></div>
-            <div class="p-body" style="padding:10px;">
-                <input type="text" id="m-url" placeholder="https://pan.baidu.com/s/..." class="p-input">
-                <input type="text" id="m-code" placeholder="提取码 (4位)" class="p-input" maxlength="4">
-                <button id="m-go" class="p-btn-block">开始转存</button>
-                <div id="m-err" class="p-error"></div>
-            </div>
-            <div class="p-foot"><button id="to-auto">返回列表</button></div>
-        `;
-
+        container.innerHTML = `<div class="p-head">手动输入 <span class="p-close">×</span></div><div class="p-body" style="padding:10px;"><input type="text" id="m-url" placeholder="链接" class="p-input"><input type="text" id="m-code" placeholder="提取码" class="p-input" maxlength="4"><button id="m-go" class="p-btn-block" ${!isAvailable?'disabled':''}>${isAvailable?'开始转存':'暂停服务'}</button><div id="m-err" class="p-error"></div></div><div class="p-foot"><button id="to-auto">返回列表</button></div>`;
         container.querySelector('.p-close').onclick = () => container.remove();
-        container.querySelector('#to-auto').onclick = () => {
-             if(container._oldItems) renderAuto(container, container._oldItems);
-             else container.remove();
-        };
-
+        container.querySelector('#to-auto').onclick = () => { if(container._oldItems) renderPanel(container, container._oldItems); else container.remove(); };
         const btn = container.querySelector('#m-go');
         btn.onclick = () => {
+            if(!isAvailable) return;
             const url = container.querySelector('#m-url').value.trim();
             const code = container.querySelector('#m-code').value.trim();
-            const err = container.querySelector('#m-err');
-            err.style.display = 'none';
-
-            if(!url.includes('baidu.com/s/')) return err.textContent = "链接无效", err.style.display = 'block';
-
-            handleTransfer({url, code}, btn, err, container, () => container.remove());
+            const err = container.querySelector('#m-err'); err.style.display = 'none';
+            if(!url.includes('baidu.com/s/')) return err.textContent = "无效链接", err.style.display = 'block';
+            processLink({url, code}, btn, err);
         };
     }
 
-    // --- 主入口 ---
-    function showPanel(items, x, y) {
-        document.getElementById('pan-simple-panel')?.remove();
+    function showUI(items, x, y) {
+        document.getElementById('pan-panel')?.remove();
         if(!items.length) return;
-
-        const container = document.createElement('div');
-        container.id = 'pan-simple-panel';
-        container._oldItems = items;
-
-        const w = 380;
-        if(x + w > window.innerWidth) x = window.innerWidth - w - 20;
-
-        container.style.cssText = `
-            position: fixed; top: ${y}px; left: ${x}px; width: ${w}px;
-            background: #fff; border: 1px solid #ccc; box-shadow: 2px 3px 10px rgba(0,0,0,0.2);
-            font-family: sans-serif; font-size: 13px; color: #333; z-index: 9999999;
-        `;
-
-        const style = document.createElement('style');
-        style.textContent = `
-            #pan-simple-panel * { box-sizing: border-box; margin: 0; padding: 0; }
-            .p-head { background: #f0f0f0; padding: 8px 10px; font-weight: bold; border-bottom: 1px solid #ddd; display: flex; justify-content: space-between; }
-            .p-close { cursor: pointer; font-size: 16px; }
-            .p-body { max-height: 360px; overflow-y: auto; }
-            .p-item { padding: 10px; border-bottom: 1px solid #eee; }
-            .p-url { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #666; margin-bottom: 5px; font-size: 12px; }
-            .p-meta { margin-bottom: 8px; }
-            .p-actions button, .p-foot button, .p-btn-block {
-                cursor: pointer; background: #fff; border: 1px solid #999; padding: 4px 10px; border-radius: 2px; font-size: 12px;
-            }
-            .p-actions button:hover { background: #eee; }
-            .p-actions button { margin-right: 5px; }
-            .p-foot { background: #f9f9f9; padding: 8px; text-align: center; border-top: 1px solid #eee; }
-            .p-foot button { border: none; background: none; color: #0066cc; text-decoration: underline; }
-            .p-input { width: 100%; padding: 5px; margin-bottom: 8px; border: 1px solid #ccc; }
-            .p-btn-block { width: 100%; background: #eee; padding: 6px; }
-            .p-error { color: red; font-size: 12px; margin-top: 5px; display: none; }
-
-            @media (prefers-color-scheme: dark) {
-                #pan-simple-panel { background: #222 !important; color: #eee !important; border-color: #444 !important; }
-                .p-head, .p-foot { background: #333 !important; border-color: #444 !important; }
-                .p-item { border-color: #444 !important; }
-                .p-url { color: #aaa !important; }
-                .p-actions button, .p-input, .p-btn-block { background: #444 !important; border-color: #666 !important; color: #eee !important; }
-                .p-actions button:hover { background: #555 !important; }
-            }
-        `;
-        container.appendChild(style);
-        document.body.appendChild(container);
-
-        renderAuto(container, items);
-        panelContainer = container;
+        const c = document.createElement('div');
+        c.id = 'pan-panel'; c._oldItems = items;
+        const w = 380; if(x + w > window.innerWidth) x = window.innerWidth - w - 20;
+        c.style.cssText = `position: fixed; top: ${y}px; left: ${x}px; width: ${w}px; background: #fff; border: 1px solid #ccc; box-shadow: 2px 3px 10px rgba(0,0,0,0.2); font-family: sans-serif; font-size: 13px; color: #333; z-index: 9999999;`;
+        const s = document.createElement('style');
+        s.textContent = `#pan-panel *{box-sizing:border-box;margin:0;padding:0}.p-head{background:#f0f0f0;padding:8px 10px;font-weight:bold;border-bottom:1px solid #ddd;display:flex;justify-content:space-between}.p-close{cursor:pointer;font-size:16px}.p-body{max-height:360px;overflow-y:auto}.p-item{padding:10px;border-bottom:1px solid #eee}.p-url{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#666;margin-bottom:5px;font-size:12px}.p-meta{margin-bottom:8px}.p-actions button,.p-foot button,.p-btn-block{cursor:pointer;background:#fff;border:1px solid #999;padding:4px 10px;border-radius:2px;font-size:12px}.p-actions button:hover{background:#eee}.p-actions button{margin-right:5px}.p-foot{background:#f9f9f9;padding:8px;text-align:center;border-top:1px solid #eee}.p-foot button{border:none;background:none;color:#0066cc;text-decoration:underline}.p-input{width:100%;padding:5px;margin-bottom:8px;border:1px solid #ccc}.p-btn-block{width:100%;background:#eee;padding:6px}.p-error{color:red;font-size:12px;margin-top:5px;display:none}@media(prefers-color-scheme:dark){#pan-panel{background:#222!important;color:#eee!important;border-color:#444!important}.p-head,.p-foot{background:#333!important;border-color:#444!important}.p-item{border-color:#444!important}.p-url{color:#aaa!important}.p-actions button,.p-input,.p-btn-block{background:#444!important;border-color:#666!important;color:#eee!important}.p-actions button:hover{background:#555!important}}`;
+        c.appendChild(s); document.body.appendChild(c);
+        renderPanel(c, items); panelRef = c;
     }
 
-    // --- 事件监听 ---
-    document.addEventListener('mouseup', e => { lastMouseX = e.clientX; lastMouseY = e.clientY; });
+    function parseText(txt) {
+        const reLink = /(https?:\/\/pan\.baidu\.com\/s\/[A-Za-z0-9_-]{5,})/gi;
+        const reCode = /\b([A-Za-z0-9]{4})\b/g;
+        const links = []; let m; while ((m = reLink.exec(txt)) !== null) links.push({url: m[1]});
+        const codes = []; while ((m = reCode.exec(txt)) !== null) codes.push(m[1]);
+        let idx = codes.length - 1;
+        return links.reverse().map(l => { let c = !/[?&]pwd=/i.test(l.url) ? (codes[idx--] || null) : null; return {url: l.url, code: c}; }).reverse();
+    }
 
-    document.addEventListener('copy', () => {
-        try {
-            const text = window.getSelection().toString();
-            if(!text.trim()) return;
-            const items = extractPanLinks(text);
-            if(items.length) showPanel(items, lastMouseX + 10, lastMouseY + 10);
-        } catch(e) {}
-    });
-
-    document.addEventListener('mousedown', e => {
-        if(panelContainer && !panelContainer.contains(e.target)) {
-            panelContainer.remove();
-            panelContainer = null;
-        }
-    });
-
+    document.addEventListener('mouseup', e => { mx = e.clientX; my = e.clientY; });
+    document.addEventListener('copy', () => { try { const t = window.getSelection().toString(); if(t.trim()) { const i = parseText(t); if(i.length) showUI(i, mx + 10, my + 10); } } catch(e) {} });
+    document.addEventListener('mousedown', e => { if(panelRef && !panelRef.contains(e.target)) { panelRef.remove(); panelRef = null; } });
 })();
